@@ -26,7 +26,7 @@ jobs:
           ARCHIVE=$(npm pack --ignore-scripts --silent)
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
           npm install --prefix "$RUNNER_TEMP/plugin-smoke" --omit=dev --ignore-scripts --no-audit --no-fund "$PWD/$ARCHIVE"
-          node -e 'const p=process.argv[1]; let registered=false; require(p+"/dist/index.js")({registerPlatform(plugin,platform){if(plugin!=="@lewiscrabtree/homebridge-blueair-purifier"||platform!=="blueair-purifier")throw Error("Unexpected registration");registered=true;}});if(!registered)throw Error("Plugin did not register");' "$RUNNER_TEMP/plugin-smoke/node_modules/@lewiscrabtree/homebridge-blueair-purifier"
+          node -e 'const p=process.argv[1]; let registered=false; require(p+"/dist/index.js")({registerPlatform(platform,constructor){if(platform!=="blueair-purifier"||typeof constructor!=="function")throw Error("Unexpected registration");registered=true;}});if(!registered)throw Error("Plugin did not register");' "$RUNNER_TEMP/plugin-smoke/node_modules/@lewiscrabtree/homebridge-blueair-purifier"
       - uses: actions/upload-artifact@v4
         with:
           name: lewis-blueair-plugin
