@@ -3,6 +3,7 @@ import { Region } from '../platformUtils';
 import GigyaApi from './GigyaApi';
 import { BLUEAIR_API_TIMEOUT, BlueAirDeviceStatusResponse, BlueAirTelemetryResponse, LOGIN_EXPIRATION, getAwsConfig } from './Consts';
 import { Mutex } from 'async-mutex';
+import { RequestPolicy, CloudHttpError, CloudCooldownError } from './RequestPolicy';
 
 type BlueAirDeviceDiscovery = {
   mac: string;
@@ -52,6 +53,8 @@ export type BlueAirDeviceStatus = {
   id: string;
   name: string;
   sku: string;
+  supportedSensors?: string[];
+  hardware?: string;
   state: BlueAirDeviceState;
   sensorData: BlueAirDeviceSensorData;
 };
@@ -75,6 +78,9 @@ export const BlueAirDeviceSensorDataMap: Record<string, keyof BlueAirDeviceSenso
 
 export default class BlueAirAwsApi {
   private readonly gigyaApi: GigyaApi;
+  private readonly policy = new RequestPolicy();
+  private loginPromise?: Promise<void>;
+  private telemetryCache = new Map<string, { time: number; data: BlueAirDeviceSensorData }>();
 
   private last_login: number;
 
@@ -97,8 +103,7 @@ export default class BlueAirAwsApi {
 
     this.mutex = new Mutex();
 
-    this.logger.debug(`Creating BlueAir API instance with config: ${JSON.stringify(config)} and username: ${username}\
-    and auth region: ${region}, cloud region: ${cloudRegion}`);
+    this.logger.debug(`Blueair auth region: ${region}; control region: ${cloudRegion}`);
 
     this.gigyaApi = new GigyaApi(username, password, region, logger);
 
@@ -108,18 +113,38 @@ export default class BlueAirAwsApi {
     this.userId = '';
   }
 
+  get cooldownMs(): number {
+    return this.policy.remainingMs;
+  }
+
   async login(): Promise<void> {
+    this.policy.assertReady();
+    if (!this.loginPromise) {
+      this.loginPromise = this.performLogin().finally(() => {
+        this.loginPromise = undefined;
+      });
+    }
+    return this.loginPromise;
+  }
+
+  private async performLogin(): Promise<void> {
     this.logger.debug('Logging in...');
 
-    const { token, secret } = await this.gigyaApi.getGigyaSession();
-    const { jwt } = await this.gigyaApi.getGigyaJWT(token, secret);
-    const { accessToken, idToken, userId } = await this.getAwsAccessToken(jwt);
-
-    this.last_login = Date.now();
-    this.accessToken = accessToken;
-    this.idToken = idToken;
-    this.userId = userId;
-
+    try {
+      const { token, secret } = await this.gigyaApi.getGigyaSession();
+      const { jwt } = await this.gigyaApi.getGigyaJWT(token, secret);
+      const { accessToken, idToken, userId } = await this.getAwsAccessToken(jwt);
+      this.last_login = Date.now();
+      this.accessToken = accessToken;
+      this.idToken = idToken;
+      this.userId = userId;
+    } catch (error) {
+      // Do not hammer login when credentials are rejected or the account is locked.
+      if (error instanceof CloudCooldownError || error instanceof CloudHttpError) {
+        throw this.policy.throttle(null, 15 * 60 * 1000);
+      }
+      throw error;
+    }
     this.logger.debug('Logged in');
   }
 
@@ -168,6 +193,10 @@ export default class BlueAirAwsApi {
         id: device.id,
         name: device.configuration.di.name,
         sku: device.configuration.di.sku,
+        hardware: device.configuration.di.hw,
+        supportedSensors: Array.from(new Set([...this.getAvailableSensorNames(device), ...device.sensordata.map((s) => s.n)]))
+          .map((name) => BlueAirDeviceSensorDataMap[name])
+          .filter((name): name is string => !!name),
         sensorData: device.sensordata.reduce((acc, sensor) => {
           const key = BlueAirDeviceSensorDataMap[sensor.n];
           if (key) {
@@ -192,18 +221,31 @@ export default class BlueAirAwsApi {
     // the historical telemetry endpoint which aggregates 5-minute sensor readings.
     // Check for the AQI inputs specifically, not just any sensor data — a device may
     // return non-AQ sensors (fanspeed/temperature/humidity) while still lacking PM/VOC.
-    const aqiSensors: (keyof BlueAirDeviceSensorData)[] = ['pm2_5', 'pm10', 'voc'];
     for (const status of deviceStatuses) {
-      if (!aqiSensors.some((key) => key in status.sensorData)) {
+      const missing = (status.supportedSensors ?? []).filter(
+        (key) => ['pm1', 'pm2_5', 'pm10', 'voc'].includes(key) && !Number.isFinite(status.sensorData[key]),
+      );
+      if (missing.length > 0) {
         const deviceInfo = data.deviceInfo.find((d) => d.id === status.id);
         const availableSensors = this.getAvailableSensorNames(deviceInfo);
         if (availableSensors.length > 0) {
           try {
-            const telemetry = await this.getDeviceTelemetry(accountUuid, status.id, availableSensors);
-            Object.assign(status.sensorData, telemetry);
-            this.logger.debug(`[${status.name}] Sensor data from telemetry: ${JSON.stringify(telemetry)}`);
+            let cached = this.telemetryCache.get(status.id);
+            if (!cached || Date.now() - cached.time >= 300000) {
+              cached = { time: Date.now(), data: await this.getDeviceTelemetry(userId, status.id, availableSensors) };
+              this.telemetryCache.set(status.id, cached);
+            }
+            for (const key of missing) {
+              if (cached.data[key] !== undefined) {
+                status.sensorData[key] = cached.data[key];
+              }
+            }
+            this.logger.debug(`[${status.name}] Sensor data from telemetry: ${JSON.stringify(cached.data)}`);
           } catch (error) {
-            this.logger.debug(`[${status.name}] Telemetry fallback failed: ${(error as Error).message}`);
+            if (error instanceof CloudCooldownError) {
+              throw error;
+            }
+            this.logger.debug(`[${status.name}] Telemetry fallback unavailable`);
           }
         }
       }
@@ -255,27 +297,28 @@ export default class BlueAirAwsApi {
       return {};
     }
 
-    const entry = data.find((e) => e.did === uuid) ?? data[0];
-    if (!entry.datapoints || entry.datapoints.length === 0) {
+    const entry = data.find((e) => e.did === uuid);
+    if (!entry?.datapoints || entry.datapoints.length === 0) {
       return {};
     }
 
-    const latestDatapoint = entry.datapoints[entry.datapoints.length - 1];
     const sensorData: BlueAirDeviceSensorData = {};
-
-    // First element is the timestamp, sensor values start at index 1
+    // Sensors can publish at different times; find the newest valid value for each one.
     for (let i = 0; i < entry.sensors.length; i++) {
-      const rawValue = latestDatapoint[i + 1];
-      if (rawValue === null || rawValue === undefined || rawValue === '') {
-        continue;
-      }
-      const value = parseFloat(rawValue);
-      if (isNaN(value)) {
-        continue;
-      }
       const key = BlueAirDeviceSensorDataMap[entry.sensors[i]];
-      if (key) {
-        sensorData[key] = value;
+      if (!key) {
+        continue;
+      }
+      for (const row of [...entry.datapoints].reverse()) {
+        const raw = row[i + 1];
+        if (raw === null || raw === undefined || raw === '') {
+          continue;
+        }
+        const value = Number(raw);
+        if (Number.isFinite(value) && value >= 0) {
+          sensorData[key] = value;
+          break;
+        }
       }
     }
 
@@ -313,7 +356,7 @@ export default class BlueAirAwsApi {
     });
 
     if (!response.access_token) {
-      throw new Error(`AWS access token error: ${JSON.stringify(response)}`);
+      throw new Error('AWS login returned no access token');
     }
 
     const accessToken = response.access_token as string;
@@ -330,44 +373,46 @@ export default class BlueAirAwsApi {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async apiCall<T = any>(url: string, data?: string | object, method = 'POST', headers?: object, retries = 3): Promise<T> {
-    const release = await this.mutex.acquire();
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), BLUEAIR_API_TIMEOUT);
-    this.logger.debug(`[AWS] apiCall request: ${method} ${this.blueAirApiUrl}${url}, body: ${JSON.stringify(data)}`);
-    try {
-      const response = await fetch(`${this.blueAirApiUrl}${url}`, {
-        method: method,
-        headers: {
-          Accept: '*/*',
-          Connection: 'keep-alive',
-          'Accept-Encoding': 'gzip, deflate, br',
-          Authorization: `Bearer ${this.accessToken}`,
-          idtoken: this.idToken || this.accessToken,
-          ...headers,
-        },
-        body: JSON.stringify(data),
-        signal: controller.signal,
-      });
-      const json = await response.json();
-      this.logger.debug(`[AWS] apiCall response: ${response.status} ${response.statusText}, body: ${JSON.stringify(json)}`);
-      if (response.status !== 200) {
-        throw new Error(`API call error with status ${response.status}: ${response.statusText}, ${JSON.stringify(json)}`);
-      }
-      return json as T;
-    } catch (error) {
-      if (retries > 0) {
-        return this.apiCall(url, data, method, headers, retries - 1);
-      } else {
-        if (error instanceof Error && error.name === 'AbortError') {
-          throw new Error(`API call failed after ${3 - retries} retries with timeout.`);
-        } else {
-          throw new Error(`API call failed after ${3 - retries} retries with error: ${error}`);
+  private async apiCall<T = any>(url: string, data?: string | object, method = 'POST', headers?: object, retries = 2): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      const release = await this.mutex.acquire();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), BLUEAIR_API_TIMEOUT);
+      try {
+        this.policy.assertReady();
+        const response = await fetch(`${this.blueAirApiUrl}${url}`, {
+          method,
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.accessToken}`,
+            idtoken: this.idToken || this.accessToken,
+            ...headers,
+          },
+          body: data === undefined ? undefined : JSON.stringify(data),
+          signal: controller.signal,
+        });
+        this.logger.debug(`[AWS] ${method} response: ${response.status}`);
+        if (response.status === 229 || response.status === 429) {
+          throw this.policy.throttle(response.headers.get('retry-after'));
         }
+        if (!response.ok) {
+          throw new CloudHttpError(response.status);
+        }
+        const result = await response.json();
+        this.policy.success();
+        return result as T;
+      } catch (error) {
+        const transient = !(error instanceof CloudCooldownError) && (!(error instanceof CloudHttpError) || error.status >= 500);
+        // Ambiguous device writes are never replayed; the next status poll reconciles them.
+        if (!transient || url.includes('/a/') || attempt >= retries) {
+          throw error;
+        }
+      } finally {
+        clearTimeout(timeout);
+        release();
       }
-    } finally {
-      clearTimeout(timeout);
-      release();
+      await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt + Math.random() * 250));
     }
   }
 }

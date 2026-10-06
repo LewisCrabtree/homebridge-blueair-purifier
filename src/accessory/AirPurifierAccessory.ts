@@ -1,9 +1,10 @@
-import { CharacteristicValue, PlatformAccessory, Service } from 'homebridge';
+import { Characteristic, CharacteristicValue, PlatformAccessory, Service } from 'homebridge';
 import { BlueAirPlatform } from '../platform';
 import { BlueAirDevice } from '../device/BlueAirDevice';
 import { AutoModeStrategy, getAutoModeStrategy } from '../device/AutoModeStrategy';
 import { DeviceConfig } from '../platformUtils';
 import { FullBlueAirDeviceState } from '../api/BlueAirAwsApi';
+import { CoalescedControl } from '../device/CoalescedControl';
 
 export class AirPurifierAccessory {
   private service: Service;
@@ -14,6 +15,9 @@ export class AirPurifierAccessory {
   private germShieldService?: Service;
   private nightModeService?: Service;
   private autoModeStrategy: AutoModeStrategy;
+  private speedControl?: CoalescedControl;
+  private pm1Characteristic?: Characteristic;
+  private readonly pm1Uuid = '7B945FD2-3854-4F43-A229-924D029F62D8';
 
   constructor(
     protected readonly platform: BlueAirPlatform,
@@ -22,15 +26,18 @@ export class AirPurifierAccessory {
     protected readonly configDev: DeviceConfig,
   ) {
     this.autoModeStrategy = getAutoModeStrategy(this.device.deviceType);
+    this.speedControl = new CoalescedControl((value) => this.applyRotationSpeed(value), this.platform.config.sliderBufferMs ?? 350);
+    this.platform.on('shutdown', () => this.speedControl?.cancel());
 
     this.accessory
       .getService(this.platform.Service.AccessoryInformation)!
       .setCharacteristic(this.platform.Characteristic.Manufacturer, 'BlueAir')
-      .setCharacteristic(this.platform.Characteristic.Model, this.configDev.model || 'BlueAir Purifier')
-      .setCharacteristic(this.platform.Characteristic.SerialNumber, this.configDev.serialNumber || 'BlueAir Device');
+      .setCharacteristic(this.platform.Characteristic.Model, this.configDev.model || this.device.sku || 'BlueAir Purifier')
+      .setCharacteristic(this.platform.Characteristic.SerialNumber, this.configDev.serialNumber || this.device.id);
 
     this.service =
       this.accessory.getService(this.platform.Service.AirPurifier) || this.accessory.addService(this.platform.Service.AirPurifier);
+    this.service.addOptionalCharacteristic(this.platform.Characteristic.StatusFault);
 
     this.service.setCharacteristic(this.platform.Characteristic.Name, this.configDev.name);
     this.service.getCharacteristic(this.platform.Characteristic.Active).onGet(this.getActive.bind(this)).onSet(this.setActive.bind(this));
@@ -66,6 +73,7 @@ export class AirPurifierAccessory {
     if (this.configDev.led) {
       this.ledService ??= this.accessory.addService(this.platform.Service.Lightbulb, `${this.device.name} Led`, 'Led');
       this.ledService.setCharacteristic(this.platform.Characteristic.Name, `${this.device.name} Led`);
+      this.ledService.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
       this.ledService.setCharacteristic(this.platform.Characteristic.ConfiguredName, `${this.device.name} Led`);
       this.ledService.getCharacteristic(this.platform.Characteristic.On).onGet(this.getLedOn.bind(this)).onSet(this.setLedOn.bind(this));
       this.ledService
@@ -84,9 +92,35 @@ export class AirPurifierAccessory {
         'AirQuality',
       );
       this.airQualityService.getCharacteristic(this.platform.Characteristic.AirQuality).onGet(this.getAirQuality.bind(this));
-      this.airQualityService.getCharacteristic(this.platform.Characteristic.PM2_5Density).onGet(this.getPM2_5Density.bind(this));
-      this.airQualityService.getCharacteristic(this.platform.Characteristic.PM10Density).onGet(this.getPM10Density.bind(this));
-      this.airQualityService.getCharacteristic(this.platform.Characteristic.VOCDensity).onGet(this.getVOCDensity.bind(this));
+      for (const [key, characteristic] of [
+        ['pm2_5', this.platform.Characteristic.PM2_5Density],
+        ['pm10', this.platform.Characteristic.PM10Density],
+        ['voc', this.platform.Characteristic.VOCDensity],
+      ] as const) {
+        if (this.device.supportedSensors.has(key)) {
+          this.airQualityService.getCharacteristic(characteristic).onGet(() => this.getDensity(key));
+        } else {
+          const obsolete = this.airQualityService.characteristics.find((item) => item.UUID === characteristic.UUID);
+          if (obsolete) {
+            this.airQualityService.removeCharacteristic(obsolete);
+          }
+        }
+      }
+      if (this.device.supportedSensors.has('pm1')) {
+        this.pm1Characteristic = this.airQualityService.characteristics.find((item) => item.UUID === this.pm1Uuid);
+        if (!this.pm1Characteristic) {
+          this.pm1Characteristic = new this.platform.Characteristic('PM1 Density', this.pm1Uuid, {
+            format: this.platform.Characteristic.Formats.FLOAT,
+            unit: '�g/m�',
+            minValue: 0,
+            maxValue: 1000,
+            minStep: 0.1,
+            perms: [this.platform.Characteristic.Perms.PAIRED_READ, this.platform.Characteristic.Perms.NOTIFY],
+          });
+          this.airQualityService.addCharacteristic(this.pm1Characteristic);
+        }
+        this.pm1Characteristic.onGet(() => this.getDensity('pm1'));
+      }
     } else if (this.airQualityService) {
       this.accessory.removeService(this.airQualityService);
     }
@@ -109,6 +143,7 @@ export class AirPurifierAccessory {
     if (this.configDev.germShield) {
       this.germShieldService ??= this.accessory.addService(this.platform.Service.Switch, `${this.device.name} Germ Shield`, 'GermShield');
       this.germShieldService.setCharacteristic(this.platform.Characteristic.Name, `${this.device.name} Germ Shield`);
+      this.germShieldService.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
       this.germShieldService.setCharacteristic(this.platform.Characteristic.ConfiguredName, `${this.device.name} Germ Shield`);
       this.germShieldService
         .getCharacteristic(this.platform.Characteristic.On)
@@ -122,6 +157,7 @@ export class AirPurifierAccessory {
     if (this.configDev.nightMode) {
       this.nightModeService ??= this.accessory.addService(this.platform.Service.Switch, `${this.device.name} Night Mode`, 'NightMode');
       this.nightModeService.setCharacteristic(this.platform.Characteristic.Name, `${this.device.name} Night Mode`);
+      this.nightModeService.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
       this.nightModeService.setCharacteristic(this.platform.Characteristic.ConfiguredName, `${this.device.name} Night Mode`);
       this.nightModeService
         .getCharacteristic(this.platform.Characteristic.On)
@@ -132,6 +168,16 @@ export class AirPurifierAccessory {
     }
 
     this.device.on('stateUpdated', this.updateCharacteristics.bind(this));
+    this.device.on('availability', (available) => {
+      const fault = available ? 0 : 1;
+      this.service.updateCharacteristic(this.platform.Characteristic.StatusFault, fault);
+      this.airQualityService?.updateCharacteristic(this.platform.Characteristic.StatusFault, fault);
+      if (!available) {
+        this.airQualityService?.updateCharacteristic(this.platform.Characteristic.AirQuality, 0);
+      } else {
+        this.airQualityService?.updateCharacteristic(this.platform.Characteristic.AirQuality, this.getAirQuality());
+      }
+    });
   }
 
   updateCharacteristics(changedStates: Partial<FullBlueAirDeviceState>) {
@@ -156,26 +202,41 @@ export class AirPurifierAccessory {
           this.service.updateCharacteristic(this.platform.Characteristic.CurrentAirPurifierState, this.getCurrentAirPurifierState());
           break;
         case 'filterusage':
-          this.service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication, this.getFilterChangeIndication());
-          this.service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, this.getFilterLifeLevel());
+          this.filterMaintenanceService?.updateCharacteristic(
+            this.platform.Characteristic.FilterChangeIndication,
+            this.getFilterChangeIndication(),
+          );
+          this.filterMaintenanceService?.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, this.getFilterLifeLevel());
           break;
         case 'temperature':
-          this.service.updateCharacteristic(this.platform.Characteristic.CurrentTemperature, this.getCurrentTemperature());
+          this.temperatureService?.updateCharacteristic(this.platform.Characteristic.CurrentTemperature, this.getCurrentTemperature());
           break;
         case 'brightness':
           this.ledService?.updateCharacteristic(this.platform.Characteristic.On, this.getLedOn());
           this.ledService?.updateCharacteristic(this.platform.Characteristic.Brightness, this.getLedBrightness());
           break;
+        case 'aqi':
+          updateAirQuality = true;
+          break;
+        case 'pm1':
+          this.pm1Characteristic?.updateValue(this.sensorValue('pm1'));
+          break;
         case 'pm2_5':
-          this.airQualityService?.updateCharacteristic(this.platform.Characteristic.PM2_5Density, this.getPM2_5Density());
+          if (this.device.supportedSensors.has('pm2_5')) {
+            this.airQualityService?.getCharacteristic(this.platform.Characteristic.PM2_5Density).updateValue(this.sensorValue('pm2_5'));
+          }
           updateAirQuality = true;
           break;
         case 'pm10':
-          this.airQualityService?.updateCharacteristic(this.platform.Characteristic.PM10Density, this.getPM10Density());
+          if (this.device.supportedSensors.has('pm10')) {
+            this.airQualityService?.getCharacteristic(this.platform.Characteristic.PM10Density).updateValue(this.sensorValue('pm10'));
+          }
           updateAirQuality = true;
           break;
         case 'voc':
-          this.airQualityService?.updateCharacteristic(this.platform.Characteristic.VOCDensity, this.getVOCDensity());
+          if (this.device.supportedSensors.has('voc')) {
+            this.airQualityService?.getCharacteristic(this.platform.Characteristic.VOCDensity).updateValue(this.sensorValue('voc'));
+          }
           updateAirQuality = true;
           break;
         case 'germshield':
@@ -208,12 +269,15 @@ export class AirPurifierAccessory {
 
   async setActive(value: CharacteristicValue) {
     this.platform.log.debug(`[${this.device.name}] Setting active to ${value}`);
+    if (value === this.platform.Characteristic.Active.INACTIVE) {
+      this.speedControl?.cancel();
+    }
     await this.device.setState('standby', value === this.platform.Characteristic.Active.INACTIVE);
   }
 
   getCurrentAirPurifierState(): CharacteristicValue {
     if (this.device.state.standby === false) {
-      return this.autoModeStrategy.isAuto(this.device.state) && this.device.state.fanspeed === 0
+      return this.device.state.fanspeed === 0
         ? this.platform.Characteristic.CurrentAirPurifierState.IDLE
         : this.platform.Characteristic.CurrentAirPurifierState.PURIFYING_AIR;
     }
@@ -247,13 +311,32 @@ export class AirPurifierAccessory {
   }
 
   getRotationSpeed(): CharacteristicValue {
-    return this.device.state.standby === false ? this.device.state.fanspeed || 0 : 0;
+    if (this.device.state.standby !== false) {
+      return 0;
+    }
+    const maximum = this.device.hardware?.startsWith('nb_') || this.device.hardware?.startsWith('high') ? 91 : 100;
+    return Math.min(100, Math.round(((this.device.state.fanspeed || 0) * 100) / maximum));
   }
 
   async setRotationSpeed(value: CharacteristicValue) {
+    const speed = Number(value);
+    if (!Number.isFinite(speed) || speed < 0 || speed > 100) {
+      throw new Error('Fan speed must be between 0 and 100');
+    }
+    if (this.speedControl) {
+      return this.speedControl.submit(speed);
+    }
+    return this.applyRotationSpeed(speed);
+  }
+
+  private async applyRotationSpeed(value: number) {
     this.platform.log.debug(`[${this.device.name}] Setting rotation speed to ${value}`);
 
-    const speed = value as number;
+    const maximum = this.device.hardware?.startsWith('nb_') || this.device.hardware?.startsWith('high') ? 91 : 100;
+    const speed = Math.round((value * maximum) / 100);
+    if (speed > 0 && this.device.state.nightmode === true) {
+      await this.device.setState('nightmode', false);
+    }
     if (speed > 0 && this.device.state.standby === true) {
       await this.device.setState('standby', false);
     }
@@ -273,7 +356,11 @@ export class AirPurifierAccessory {
   }
 
   getFilterLifeLevel(): CharacteristicValue {
-    return Math.min(100, Math.max(0, 100 - (this.device.state.filterusage || 0)));
+    const usage = this.device.state.filterusage;
+    if (usage === undefined || !Number.isFinite(usage)) {
+      throw new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+    return Math.min(100, Math.max(0, 100 - usage));
   }
 
   getCurrentTemperature(): CharacteristicValue {
@@ -298,16 +385,31 @@ export class AirPurifierAccessory {
     await this.device.setState('brightness', value as number);
   }
 
+  private sensorValue(key: string): number | Error {
+    const value = this.device.sensorData[key];
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? value
+      : new this.platform.api.hap.HapStatusError(this.platform.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+  }
+
+  private getDensity(key: string): CharacteristicValue {
+    const value = this.sensorValue(key);
+    if (value instanceof Error) {
+      throw value;
+    }
+    return value;
+  }
+
   getPM2_5Density(): CharacteristicValue {
-    return this.device.sensorData.pm2_5 || 0;
+    return this.getDensity('pm2_5');
   }
 
   getPM10Density(): CharacteristicValue {
-    return this.device.sensorData.pm10 || 0;
+    return this.getDensity('pm10');
   }
 
   getVOCDensity(): CharacteristicValue {
-    return this.device.sensorData.voc || 0;
+    return this.getDensity('voc');
   }
 
   getAirQuality(): CharacteristicValue {

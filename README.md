@@ -1,28 +1,50 @@
-<p align="center">
-  <a href="https://github.com/homebridge/verified/blob/master/verified-plugins.json"><img alt="Homebridge Verified" src="./branding/Homebridge_x_Blueair.svg" width="500px"></a>
-</p>
+# Blueair Purifier (Lewis fork)
 
-# homebridge-blueair-purifier
+A personal fork of [kovapatrik/homebridge-blueair-purifier](https://github.com/kovapatrik/homebridge-blueair-purifier), retaining its Apache-2.0 license and upstream credits. Package identity: `@lewiscrabtree/homebridge-blueair-purifier`. Platform alias: `blueair-purifier`.
 
-[![verified-by-homebridge](https://badgen.net/badge/homebridge/verified/purple)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
-[![npm](https://badgen.net/npm/v/homebridge-blueair-purifier)](https://www.npmjs.com/package/homebridge-blueair-purifier)
-[![npm](https://badgen.net/npm/dt/homebridge-blueair-purifier?label=downloads)](https://www.npmjs.com/package/homebridge-blueair-purifier)
+## Changes
 
-## Installation
+- Cloud throttling (229/429) stops immediate retries and starts a shared client cooldown, honoring Retry-After. Failed authentication waits at least 15 minutes. Login refresh is single-flight and has a timeout.
+- Polling has a 60-second minimum, backs off after failures, recovers from startup failures, and stops on shutdown. Reads and cloud writes share a lock. Slider values are buffered for 350 ms and only the last value is sent.
+- Failed writes reject HomeKit handlers. Ambiguous writes are never automatically replayed. A successful cloud acknowledgement is reconciled by the next poll; it is not proof of physical application.
+- AQI uses the current snapshot, caps values above the scale, and handles fractional PM10 correctly. Missing or invalid readings remain unavailable, not zero. The derived category is an instantaneous approximation, not an official regulatory AQI exposure measurement.
+- Missing particulate readings can fall back to five-minute cloud history. Historical requests are cached for five minutes; sparse rows are searched per sensor. Fresh REST readings take precedence.
+- Filter updates target FilterMaintenance. Replacement threshold means percentage USED. Unsupported sensors are omitted. PM1 is a custom characteristic for apps such as Eve/Controller; Apple Home may not display it.
+- Manual fan control exits Night and Auto. Hardware reporting `nb_`/`high` uses a 0-91 raw range mapped to a 0-100% HomeKit slider. Physical steps and firmware behavior must be checked on the target device.
+- Discovery respects the cloud-region override. Debug logging no longer prints credentials, environment variables, configuration objects, or token responses.
 
-**Option 1: Install via Homebridge Config UI X:**
+## Install
 
-Search for "Blueair Purifier" in in [homebridge-config-ui-x](https://github.com/oznu/homebridge-config-ui-x) and install `homebridge-blueair-purifier`.
+Use a built `.tgz` from this repository's Actions package workflow or a locally verified `npm pack` output. From the Homebridge terminal:
 
-**Option 2: Manually Install:**
-
-```text
-sudo npm install -g homebridge-blueair-purifier
+```sh
+hb-service add /path/to/lewiscrabtree-homebridge-blueair-purifier-1.3.0-lewis.0.tgz
 ```
+
+Alternatively, install a pinned Git commit (npm builds the TypeScript via the prepare script):
+
+```sh
+hb-service add github:LewisCrabtree/homebridge-blueair-purifier#COMMIT_SHA
+```
+
+Do not run this fork and the original plugin together: they intentionally share a platform alias. Use a separate child bridge. In plugin settings, Discover Devices, enter Blueair credentials, select the account region, add the purifier, and enable LED, Night Mode and Air Quality Sensor as desired. If authentication succeeds but discovery/control fails, set Cloud Region Override to the device-control region and discover again.
+
+## Validation and limits
+
+```sh
+npm ci --ignore-scripts
+npm run lint -- --max-warnings=0
+npm test
+npm pack --ignore-scripts
+```
+
+Automated tests cover actual HAP services, sensor boundaries/missing data, failure propagation, concurrent writes, buffered controls, throttling, login coalescing, telemetry fallback and startup/shutdown recovery. Hardware acceptance requires HomeKit/app/device agreement for power, every physical fan level, Auto, Night, LEDs, child lock, particulate readings, filter status, and reconnection. Cloud telemetry can lag; this version uses REST and historical fallback, not MQTT push or local control. Blueair service outages and account-wide quotas still apply.
+
+Before deployment, back up Homebridge's config and installed-package manifest outside this repository. Rollback consists of removing this scoped package and restoring the prior config/package installation. Never commit account credentials, device identifiers, or Homebridge backups.
 
 ## Supported Devices
 
-This plugin only supports WiFi connected BlueAir purifiers utilizing cloud connectivity (via AWS) for device communication. Below is a list of known tested products.
+This plugin only supports WiFi connected BlueAir purifiers utilizing cloud connectivity (via AWS) for device communication. The upstream plugin lists the following devices. This fork is being validated on a Blue Pure 211i Max; other models have regression tests but have not been tested on hardware here.
 
 | Device | Product Page |
 |----------------|------------|

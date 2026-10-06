@@ -25,7 +25,13 @@
         "title": "Region",
         "description": "Region for BlueAir account. This should be filled in automatically in the discovery process.",
         "type": "string",
-        "enum": ["Default (all other regions)", "Australia", "China", "Russia", "USA"],
+        "enum": [
+          "Default (all other regions)",
+          "Australia",
+          "China",
+          "Russia",
+          "USA"
+        ],
         "default": "Default (all other regions)",
         "required": true
       },
@@ -33,7 +39,13 @@
         "title": "Cloud Region Override",
         "description": "Optional BlueCloud device-control region. Leave unset to use Region. Some accounts authenticate in one region but their live device-control plane is in another.",
         "type": "string",
-        "enum": ["Default (all other regions)", "Australia", "China", "Russia", "USA"]
+        "enum": [
+          "Default (all other regions)",
+          "Australia",
+          "China",
+          "Russia",
+          "USA"
+        ]
       },
       "accountUuid": {
         "title": "Account UUID",
@@ -52,8 +64,10 @@
       },
       "pollingInterval": {
         "title": "Polling Interval",
-        "description": "Interval in miliseconds to poll the BlueAir API for updates. It's recommended to keep this at least 15 seconds (15000 miliseconds).",
-        "type": "number"
+        "description": "Cloud refresh interval in milliseconds. Minimum 60000; historical sensor data is cached for five minutes. API failures use cooldown/backoff.",
+        "type": "number",
+        "minimum": 60000,
+        "default": 60000
       },
       "devices": {
         "title": "Devices",
@@ -81,7 +95,7 @@
             },
             "filterChangeLevel": {
               "title": "Filter Change Level",
-              "description": "Percentage of filter life remaining to trigger a filter change alert.",
+              "description": "Percentage of filter life USED that triggers the replacement alert (90 means 10% remaining).",
               "type": "number"
             },
             "led": {
@@ -111,6 +125,14 @@
             }
           }
         }
+      },
+      "sliderBufferMs": {
+        "title": "Fan slider buffer",
+        "description": "Wait for the final slider value before sending a cloud command (milliseconds).",
+        "type": "number",
+        "minimum": 0,
+        "maximum": 2000,
+        "default": 350
       }
     }
   },
@@ -123,7 +145,17 @@
           "expandable": true,
           "expanded": true,
           "title": "Common Settings",
-          "items": ["name", "username", "password", "region", "cloudRegion", "accountUuid", "verboseLogging", "uiDebug", "pollingInterval"]
+          "items": [
+            "name",
+            "username",
+            "password",
+            "region",
+            "cloudRegion",
+            "accountUuid",
+            "verboseLogging",
+            "uiDebug",
+            "pollingInterval"
+          ]
         },
         {
           "key": "devices",

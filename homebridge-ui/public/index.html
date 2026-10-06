@@ -99,7 +99,6 @@
        }
      }
 
-     debugLog(`Plugin Config:\n${JSON.stringify(configuration, null, 2)}`);
      configuration = await homebridge.request('/mergeToDefault', { config: configuration });
 
      /*********************************************************************
@@ -172,7 +171,6 @@
        const configForm = homebridge.createForm(configSchema, configuration);
        configForm.onChange(async (changes) => {
          changes = filterOutDefaults(changes, defaultConfig);
-         debugLog(`[createForm] Config changes:\n${JSON.stringify(changes, null, 2)}`);
          await homebridge.updatePluginConfig([changes]);
        });
      }
@@ -194,18 +192,18 @@
 
        console.info(`Request login...`);
        try {
-          const devices = await homebridge.request('/discover', { username, password, region });
+          let currentConfig = await homebridge.getPluginConfig();
+          currentConfig = currentConfig.length > 0 ? currentConfig[0] : {};
+          const devices = await homebridge.request('/discover', { username, password, region, cloudRegion: currentConfig.cloudRegion });
           debugLog(`Discovered devices:\n${JSON.stringify(devices, null, 2)}`);
           const table = document.getElementById('discoverTable').getElementsByTagName('tbody')[0];
           table.innerHTML = '';
 
           // Merge current config over to the server so discover has latest device config...
-          let currentConfig = await homebridge.getPluginConfig();
-          currentConfig = currentConfig.length > 0 ? currentConfig[0] : {};
           configuration = await homebridge.request('/mergeToDefault', { config: currentConfig });
 
           currentConfig.devices = currentConfig.devices || [];
-          if (devices) {
+          if (devices && devices.length > 0) {
 
             const accountUuid = devices[0].name;
 
@@ -220,6 +218,7 @@
               const state = initialStates.find((s) => s.id === device.uuid);
               const tr = table.insertRow();
               const td = tr.insertCell();
+              if (!state) { tr.remove(); return; }
               td.appendChild(document.createTextNode(state.name));
               td.setAttribute('scope', 'row');
 

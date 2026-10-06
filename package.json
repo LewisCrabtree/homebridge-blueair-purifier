@@ -1,16 +1,16 @@
 {
-  "displayName": "Homebridge BlueAir Platform",
-  "name": "homebridge-blueair-purifier",
-  "version": "1.2.2",
+  "displayName": "Blueair Purifier (Lewis)",
+  "name": "@lewiscrabtree/homebridge-blueair-purifier",
+  "version": "1.3.0-lewis.0",
   "description": "Homebridge plugin for BlueAir purifiers",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kovapatrik/homebridge-blueair-purifier.git"
+    "url": "git+https://github.com/LewisCrabtree/homebridge-blueair-purifier.git"
   },
-  "homepage": "https://github.com/kovapatrik/homebridge-blueair-purifier#readme",
+  "homepage": "https://github.com/LewisCrabtree/homebridge-blueair-purifier#readme",
   "bugs": {
-    "url": "https://github.com/kovapatrik/homebridge-blueair-purifier/issues"
+    "url": "https://github.com/LewisCrabtree/homebridge-blueair-purifier/issues"
   },
   "funding": [
     {
@@ -32,7 +32,9 @@
     "watch": "npm run build && npm link && nodemon",
     "build": "rimraf ./dist && tsc",
     "prepublishOnly": "npm run lint && npm run build",
-    "format": "prettier --log-level warn --write \"**/*.ts\" && npm run lint -- --fix"
+    "format": "prettier --log-level warn --write \"**/*.ts\" && npm run lint -- --fix",
+    "test": "npm run build && node --test test/*.cjs",
+    "prepare": "npm run build"
   },
   "keywords": [
     "homebridge-plugin",
@@ -59,5 +61,12 @@
     "@homebridge/plugin-ui-utils": "^1.0.3",
     "async-mutex": "^0.5.0",
     "lodash": "^4.17.21"
-  }
+  },
+  "files": [
+    "dist",
+    "homebridge-ui",
+    "config.schema.json",
+    "README.md",
+    "LICENSE"
+  ]
 }

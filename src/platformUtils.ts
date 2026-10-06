@@ -8,6 +8,7 @@ export type Config = {
   verboseLogging: boolean;
   uiDebug: boolean;
   pollingInterval: number;
+  sliderBufferMs: number;
   devices: DeviceConfig[];
 };
 
@@ -42,7 +43,8 @@ export const defaultConfig: Config = {
   password: '',
   accountUuid: '',
   region: Region.EU,
-  pollingInterval: 15000,
+  pollingInterval: 60000,
+  sliderBufferMs: 350,
   devices: [],
 };
 

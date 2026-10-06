@@ -1,34 +1,10 @@
-name: Release Please
-
+name: Upstream release automation disabled
 on:
-  push:
-    branches:
-      - main
-
+  workflow_dispatch:
 permissions:
-  contents: write
-  pull-requests: write
-  id-token: write
-
+  contents: read
 jobs:
-  release-please:
+  explain:
     runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
     steps:
-      - uses: googleapis/release-please-action@v5
-        id: release
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-  publish:
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    uses: ./.github/workflows/publish.yml
-    with:
-      tag: latest
-    permissions:
-      id-token: write
-      contents: read
+      - run: echo 'This fork distributes packages from GitHub. No npm publication is configured.'

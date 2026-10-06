@@ -56,7 +56,6 @@ class Logger {
  * Main server-side script called when Custom UI client sends requests
  */
 class UiServer extends HomebridgePluginUiServer {
-
   logger;
   config;
   api;
@@ -67,7 +66,6 @@ class UiServer extends HomebridgePluginUiServer {
     const config = require(this.homebridgeConfigPath).platforms.find((obj) => obj.platform === 'blueair-purifier');
     this.logger = new Logger(config?.uiDebug ? config.uiDebug : false);
     this.logger.info('Custom UI created.');
-    this.logger.debug(`ENV:\n${JSON.stringify(process.env, null, 2)}`);
 
     this.onRequest('/mergeToDefault', async ({ config }) => {
       _.defaultsDeep(config, defaultConfig);
@@ -76,7 +74,7 @@ class UiServer extends HomebridgePluginUiServer {
       });
       this.config = config;
       this.logger.setDebugEnabled(config.uiDebug ? config.uiDebug : false);
-      this.logger.debug(`Merged config:\n${JSON.stringify(config, null, 2)}`);
+
       return config;
     });
 
@@ -87,9 +85,9 @@ class UiServer extends HomebridgePluginUiServer {
       };
     });
 
-    this.onRequest('/discover', async ({ username, password, region }) => {
+    this.onRequest('/discover', async ({ username, password, region, cloudRegion }) => {
       try {
-        this.api = new BlueAirAwsApi(username, password, region, this.logger);
+        this.api = new BlueAirAwsApi(username, password, region, this.logger, cloudRegion || this.config?.cloudRegion || region);
         await this.api.login();
         const devices = await this.api.getDevices();
 

@@ -1,6 +1,8 @@
 import { Logger } from 'homebridge';
 import { getGigyaConfig } from './Consts';
 import { Region } from '../platformUtils';
+import { BLUEAIR_API_TIMEOUT } from './Consts';
+import { CloudHttpError, CloudCooldownError } from './RequestPolicy';
 
 export default class GigyaApi {
   private api_key: string;
@@ -14,7 +16,7 @@ export default class GigyaApi {
   ) {
     const config = getGigyaConfig(region);
 
-    this.logger.debug(`Creating Gigya API instance with config: ${JSON.stringify(config)} and username: ${username} and region: ${region}`);
+    this.logger.debug(`Gigya account region: ${region}`);
 
     this.api_key = config.apiKey;
     this.gigyaApiUrl = `https://accounts.${config.gigyaRegion}.gigya.com`;
@@ -31,7 +33,7 @@ export default class GigyaApi {
     const response = await this.apiCall('/accounts.login', params.toString());
 
     if (!response.sessionInfo) {
-      throw new Error(`Gigya session error: sessionInfo in response: ${JSON.stringify(response)}`);
+      throw new CloudCooldownError(15 * 60 * 1000, 'Blueair account authentication was rejected or locked; check credentials and region');
     }
 
     this.logger.debug('Gigya session received');
@@ -51,7 +53,7 @@ export default class GigyaApi {
     const response = await this.apiCall('/accounts.getJWT', params.toString());
 
     if (!response.id_token) {
-      throw new Error(`Gigya JWT error: no id_token in response: ${JSON.stringify(response)}`);
+      throw new Error('Gigya returned no JWT');
     }
 
     this.logger.debug('Gigya JWT received');
@@ -61,32 +63,22 @@ export default class GigyaApi {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async apiCall(url: string, data: string, retries = 3): Promise<any> {
+  private async apiCall(url: string, data: string): Promise<any> {
     const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), BLUEAIR_API_TIMEOUT);
     try {
-      const response = await fetch(`${this.gigyaApiUrl}${url}?${data}`, {
+      const response = await fetch(`${this.gigyaApiUrl}${url}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: '*/*',
-          Connection: 'keep-alive',
-          'Accept-Encoding': 'gzip, deflate, br',
-        },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: data,
         signal: controller.signal,
       });
-      const json = await response.json();
-      if (response.status !== 200) {
-        throw new Error(`API call error with status ${response.status}: ${response.statusText}, ${JSON.stringify(json)}`);
+      if (!response.ok) {
+        throw new CloudHttpError(response.status);
       }
-      return json;
-    } catch (error) {
-      this.logger.error(`API call failed: ${error}`);
-      if (retries > 0) {
-        this.logger.debug(`Retrying API call (${retries} retries left)...`);
-        return this.apiCall(url, data, retries - 1);
-      } else {
-        throw new Error(`API call failed after ${retries} retries`);
-      }
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }

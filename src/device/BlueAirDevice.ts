@@ -34,177 +34,112 @@ const AQI: { [key: string]: AQILevels } = {
 
 type BlueAirSensorDataWithAqi = BlueAirDeviceSensorData & { aqi?: number };
 
-type PendingChanges = {
-  state: Partial<BlueAirDeviceState>;
-  sensorData: Partial<BlueAirSensorDataWithAqi>;
-};
+export type DeviceWriter = (attribute: string, value: number | boolean) => Promise<void>;
 
-interface BlueAirDeviceEvents {
-  stateUpdated: (changedStates: Partial<FullBlueAirDeviceState>) => void;
-  update: (newState: BlueAirDeviceStatus) => void;
-  setState: (data: { id: string; name: string; attribute: string; value: number | boolean }) => void;
-  setStateDone: (success: boolean) => void;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-export interface BlueAirDevice {
-  on<K extends keyof BlueAirDeviceEvents>(event: K, listener: BlueAirDeviceEvents[K]): this;
-  emit<K extends keyof BlueAirDeviceEvents>(event: K, ...args: Parameters<BlueAirDeviceEvents[K]>): boolean;
-  once<K extends keyof BlueAirDeviceEvents>(event: K, listener: BlueAirDeviceEvents[K]): this;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class BlueAirDevice extends EventEmitter {
   public state: BlueAirDeviceState;
   public sensorData: BlueAirSensorDataWithAqi;
-
   public readonly id: string;
   public readonly name: string;
   public readonly sku: string;
   public readonly deviceType: BlueAirDeviceType;
+  public readonly supportedSensors: Set<string>;
+  public readonly hardware?: string;
+  private readonly writeMutex = new Mutex();
+  private lastBrightness: number;
 
-  private mutex: Mutex;
-
-  private currentChanges: PendingChanges;
-
-  private last_brightness: number;
-
-  constructor(device: BlueAirDeviceStatus) {
+  constructor(
+    device: BlueAirDeviceStatus,
+    private readonly writer?: DeviceWriter,
+  ) {
     super();
     this.id = device.id;
     this.name = device.name;
     this.sku = device.sku;
+    this.hardware = device.hardware;
     this.deviceType = getDeviceType(device.sku);
-
-    this.state = device.state;
-    this.sensorData = {
-      ...device.sensorData,
-      aqi: undefined,
-    };
+    this.supportedSensors = new Set(device.supportedSensors ?? Object.keys(device.sensorData));
+    this.state = { ...device.state };
+    this.sensorData = { ...device.sensorData };
     this.sensorData.aqi = this.calculateAqi();
-
-    this.mutex = new Mutex();
-    this.currentChanges = {
-      state: {},
-      sensorData: {},
-    };
-
-    this.last_brightness = this.state.brightness || 0;
-
+    this.lastBrightness = this.state.brightness || 100;
     this.on('update', this.updateState.bind(this));
   }
 
-  private hasChanges(changes: PendingChanges): boolean {
-    return Object.keys(changes.state).length > 0 || Object.keys(changes.sensorData).length > 0;
-  }
-
-  private async notifyStateUpdate(newState?: Partial<BlueAirDeviceState>, newSensorData?: Partial<BlueAirDeviceSensorData>) {
-    this.currentChanges = {
-      state: {
-        ...this.currentChanges.state,
-        ...newState,
-      },
-      sensorData: {
-        ...this.currentChanges.sensorData,
-        ...newSensorData,
-      },
-    };
-
-    // always acquire the mutex to ensure all changes are eventually applied
-    const release = await this.mutex.acquire();
-
-    const changesToApply = this.currentChanges;
-    this.currentChanges = { state: {}, sensorData: {} };
-
-    // if there is a change, emit update event
-    if (this.hasChanges(changesToApply)) {
-      this.state = { ...this.state, ...changesToApply.state };
-      this.sensorData = { ...this.sensorData, ...changesToApply.sensorData };
-      this.emit('stateUpdated', { ...changesToApply.state, ...changesToApply.sensorData });
-    }
-
-    release();
-  }
-
-  public async setState(attribute: string, value: number | boolean) {
-    if (attribute in this.state === false) {
-      throw new Error(`Invalid state: ${attribute}`);
-    }
-
-    if (this.state[attribute] === value) {
-      return;
-    }
-
-    this.emit('setState', { id: this.id, name: this.name, attribute, value });
-
-    const release = await this.mutex.acquire();
-
-    return new Promise<void>((resolve) => {
-      this.once('setStateDone', async (success) => {
-        release();
-        if (success) {
-          const newState: Partial<BlueAirDeviceState> = { [attribute]: value };
-          if (attribute === 'nightmode' && value === true) {
-            newState['fanspeed'] = 11;
-            newState['brightness'] = 0;
-          }
-          await this.notifyStateUpdate(newState);
-        }
-        resolve();
-      });
+  public async setState(attribute: string, value: number | boolean): Promise<void> {
+    await this.writeMutex.runExclusive(async () => {
+      if (!(attribute in this.state)) {
+        throw new Error(`Unsupported control: ${attribute}`);
+      }
+      if (this.state[attribute] === value) {
+        return;
+      }
+      if (!this.writer) {
+        throw new Error('No cloud writer configured');
+      }
+      await this.writer(attribute, value);
+      // A cloud acknowledgement is not physical-device confirmation. Polling reconciles the snapshot.
+      this.state = { ...this.state, [attribute]: value };
+      this.emit('stateUpdated', { [attribute]: value });
     });
   }
 
   public async setLedOn(value: boolean) {
-    if (!value) {
-      this.last_brightness = this.state.brightness || 0;
+    if (!value && (this.state.brightness || 0) > 0) {
+      this.lastBrightness = this.state.brightness!;
     }
-    const brightness = value ? this.last_brightness : 0;
-    await this.setState('brightness', brightness);
+    await this.setState('brightness', value ? this.lastBrightness : 0);
   }
 
-  private async updateState(newState: BlueAirDeviceStatus) {
-    const changedState: Partial<BlueAirDeviceState> = {};
-    const changedSensorData: Partial<BlueAirSensorDataWithAqi> = {};
-
-    for (const [k, v] of Object.entries(newState.state)) {
-      if (this.state[k] !== v) {
-        changedState[k] = v;
+  public updateState(newState: BlueAirDeviceStatus) {
+    const changes: Partial<FullBlueAirDeviceState> = {};
+    for (const [key, value] of Object.entries(newState.state)) {
+      if (this.state[key] !== value) {
+        changes[key] = value;
       }
     }
-    for (const [k, v] of Object.entries(newState.sensorData)) {
-      if (this.sensorData[k] !== v) {
-        changedSensorData[k] = v;
-        if (k === 'pm2_5' || k === 'pm10' || k === 'voc') {
-          changedSensorData.aqi = this.calculateAqi();
-        }
+    // REST can omit a sensor it has not received recently. Do not replace missing data with zero.
+    const sensors: BlueAirSensorDataWithAqi = { ...newState.sensorData };
+    sensors.aqi = this.calculateAqi(sensors);
+    for (const key of new Set([...Object.keys(this.sensorData), ...Object.keys(sensors)])) {
+      if (this.sensorData[key] !== sensors[key]) {
+        changes[key] = sensors[key];
       }
     }
-    await this.notifyStateUpdate(changedState, changedSensorData);
-  }
-
-  private calculateAqi(): number | undefined {
-    if (this.sensorData.pm2_5 === undefined && this.sensorData.pm10 === undefined && this.sensorData.voc === undefined) {
-      return undefined;
+    this.state = { ...this.state, ...newState.state };
+    this.sensorData = sensors;
+    if (Object.keys(changes).length > 0) {
+      this.emit('stateUpdated', changes);
     }
-
-    const pm2_5 = Math.round((this.sensorData.pm2_5 || 0) * 10) / 10;
-    const pm10 = this.sensorData.pm10 || 0;
-    const voc = this.sensorData.voc || 0;
-
-    const aqi_pm2_5 = this.calculateAqiForSensor(pm2_5, 'PM2_5');
-    const aqi_pm10 = this.calculateAqiForSensor(pm10, 'PM10');
-    const aqi_voc = this.calculateAqiForSensor(voc, 'VOC');
-
-    return Math.max(aqi_pm2_5, aqi_pm10, aqi_voc);
   }
 
-  private calculateAqiForSensor(value: number, sensor: string) {
+  private calculateAqi(sensors = this.sensorData): number | undefined {
+    const results: number[] = [];
+    for (const [key, type] of [
+      ['pm2_5', 'PM2_5'],
+      ['pm10', 'PM10'],
+      ['voc', 'VOC'],
+    ]) {
+      const value = sensors[key];
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        const concentration = type === 'PM2_5' ? Math.floor(value * 10) / 10 : Math.floor(value);
+        results.push(this.calculateAqiForSensor(concentration, type));
+      }
+    }
+    return results.length ? Math.max(...results) : undefined;
+  }
+
+  private calculateAqiForSensor(value: number, sensor: string): number {
     const levels = AQI[sensor];
-    for (let i = 0; i < levels.AQI_LO.length; i++) {
-      if (value >= levels.CONC_LO[i] && value <= levels.CONC_HI[i]) {
+    const last = levels.AQI_LO.length - 1;
+    if (value > levels.CONC_HI[last]) {
+      return levels.AQI_HI[last];
+    }
+    for (let i = 0; i <= last; i++) {
+      if (value <= levels.CONC_HI[i]) {
         return Math.round(
-          ((levels.AQI_HI[i] - levels.AQI_LO[i]) / (levels.CONC_HI[i] - levels.CONC_LO[i])) * (value - levels.CONC_LO[i]) +
+          ((levels.AQI_HI[i] - levels.AQI_LO[i]) / (levels.CONC_HI[i] - levels.CONC_LO[i])) *
+            (Math.max(value, levels.CONC_LO[i]) - levels.CONC_LO[i]) +
             levels.AQI_LO[i],
         );
       }
