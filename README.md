@@ -15,10 +15,10 @@ A personal fork of [kovapatrik/homebridge-blueair-purifier](https://github.com/k
 
 ## Install
 
-Use a built `.tgz` from this repository's Actions package workflow or a locally verified `npm pack` output. From the Homebridge terminal:
+Use the `.tgz` attached to a GitHub release or the manual Actions package artifact. From the Homebridge terminal:
 
 ```sh
-npm install --prefix /var/lib/homebridge --save --omit=dev /path/to/lewiscrabtree-homebridge-blueair-purifier-1.3.0-lewis.0.tgz
+npm install --prefix /var/lib/homebridge --save --omit=dev /path/to/lewiscrabtree-homebridge-blueair-purifier-1.3.0-lewis.1.tgz
 ```
 
 Alternatively, install a pinned Git commit (npm builds the TypeScript via the prepare script):
@@ -30,6 +30,8 @@ npm install --prefix /var/lib/homebridge --save --omit=dev github:LewisCrabtree/
 Do not run this fork and the original plugin together: they intentionally share a platform alias. Use a separate child bridge. In plugin settings, Discover Devices, enter Blueair credentials, select the account region, add the purifier, and enable LED, Night Mode and Air Quality Sensor as desired. If authentication succeeds but discovery/control fails, set Cloud Region Override to the device-control region and discover again.
 
 ## Validation and limits
+
+Pushes to main and pull requests run lint, TypeScript builds, and regression tests on Node 20, 22, and 24. The Package and release workflow repeats that matrix, builds an archive plus SHA256 checksum, and loads the production package to verify Homebridge registration. A manual run creates a downloadable Actions artifact. Pushing a `v` tag matching the package version also publishes a GitHub release; versions containing a hyphen are prereleases. Nothing is published to npm. Homebridge installations remain pinned to a chosen release URL and are updated deliberately after hardware checks.
 
 ```sh
 npm ci --ignore-scripts
