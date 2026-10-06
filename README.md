@@ -18,13 +18,13 @@ A personal fork of [kovapatrik/homebridge-blueair-purifier](https://github.com/k
 Use a built `.tgz` from this repository's Actions package workflow or a locally verified `npm pack` output. From the Homebridge terminal:
 
 ```sh
-hb-service add /path/to/lewiscrabtree-homebridge-blueair-purifier-1.3.0-lewis.0.tgz
+npm install --prefix /var/lib/homebridge --save --omit=dev /path/to/lewiscrabtree-homebridge-blueair-purifier-1.3.0-lewis.0.tgz
 ```
 
 Alternatively, install a pinned Git commit (npm builds the TypeScript via the prepare script):
 
 ```sh
-hb-service add github:LewisCrabtree/homebridge-blueair-purifier#COMMIT_SHA
+npm install --prefix /var/lib/homebridge --save --omit=dev github:LewisCrabtree/homebridge-blueair-purifier#COMMIT_SHA
 ```
 
 Do not run this fork and the original plugin together: they intentionally share a platform alias. Use a separate child bridge. In plugin settings, Discover Devices, enter Blueair credentials, select the account region, add the purifier, and enable LED, Night Mode and Air Quality Sensor as desired. If authentication succeeds but discovery/control fails, set Cloud Region Override to the device-control region and discover again.
