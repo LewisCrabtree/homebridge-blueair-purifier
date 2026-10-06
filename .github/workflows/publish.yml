@@ -10,7 +10,7 @@ jobs:
     uses: ./.github/workflows/build.yml
   package:
     needs: validate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -27,7 +27,7 @@ jobs:
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
           npm install --prefix "$RUNNER_TEMP/plugin-smoke" --omit=dev --ignore-scripts --no-audit --no-fund "$PWD/$ARCHIVE"
           node -e 'const p=process.argv[1]; let registered=false; require(p+"/dist/index.js")({registerPlatform(platform,constructor){if(platform!=="blueair-purifier"||typeof constructor!=="function")throw Error("Unexpected registration");registered=true;}});if(!registered)throw Error("Plugin did not register");' "$RUNNER_TEMP/plugin-smoke/node_modules/@lewiscrabtree/homebridge-blueair-purifier"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lewis-blueair-plugin
           path: |
