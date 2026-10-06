@@ -41,7 +41,7 @@ jobs:
         run: |
           VERSION=$(node -p 'require("./package.json").version')
           test "$RELEASE_TAG" = "v$VERSION"
-          printf '%s\n' 'Personal Blueair Homebridge fork. Node 20/22/24 tests, lint, build, and packaged runtime checks passed. See README for features, installation, and hardware validation limits.' > "$RUNNER_TEMP/release-notes.txt"
+          cp docs/RELEASE.md "$RUNNER_TEMP/release-notes.txt"
           EXTRA=()
           if [[ "$VERSION" == *-* ]]; then EXTRA+=(--prerelease); fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
