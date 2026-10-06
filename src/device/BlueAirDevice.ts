@@ -47,10 +47,17 @@ export class BlueAirDevice extends EventEmitter {
   public readonly hardware?: string;
   private readonly writeMutex = new Mutex();
   private lastBrightness: number;
+  private sensorTimes = new Map<string, number>();
+  private sensorSources = new Map<string, string>();
+  private pushStateTimes = new Map<string, number>();
+  private pendingReports = new Map<string, { value: number | boolean; requestedAt: number; timer: NodeJS.Timeout }>();
+  private reportedStates = new Map<string, { value: unknown; at: number; receivedAt: number }>();
+  private reportTrackingStopped = false;
 
   constructor(
     device: BlueAirDeviceStatus,
     private readonly writer?: DeviceWriter,
+    private readonly trackReports = false,
   ) {
     super();
     this.id = device.id;
@@ -61,6 +68,13 @@ export class BlueAirDevice extends EventEmitter {
     this.supportedSensors = new Set(device.supportedSensors ?? Object.keys(device.sensorData));
     this.state = { ...device.state };
     this.sensorData = { ...device.sensorData };
+    for (const key of Object.keys(device.sensorData)) {
+      this.sensorTimes.set(key, device.sensorTimestamps?.[key] ?? Date.now());
+      this.sensorSources.set(key, device.historicalSensors?.includes(key) ? 'history' : 'rest');
+      if (Date.now() - this.sensorTimes.get(key)! >= 600000) {
+        delete this.sensorData[key];
+      }
+    }
     this.sensorData.aqi = this.calculateAqi();
     this.lastBrightness = this.state.brightness || 100;
     this.on('update', this.updateState.bind(this));
@@ -77,7 +91,21 @@ export class BlueAirDevice extends EventEmitter {
       if (!this.writer) {
         throw new Error('No cloud writer configured');
       }
+      const requestedAt = Date.now();
       await this.writer(attribute, value);
+      if (this.trackReports && !this.reportTrackingStopped) {
+        clearTimeout(this.pendingReports.get(attribute)?.timer);
+        const timer = setTimeout(() => {
+          this.pendingReports.delete(attribute);
+          this.emit('commandConfirmation', attribute, 'unconfirmed');
+        }, 30000);
+        timer.unref();
+        this.pendingReports.set(attribute, { value, requestedAt, timer });
+        const report = this.reportedStates.get(attribute);
+        if (report) {
+          this.confirmReport(attribute, report.value, report.at, report.receivedAt);
+        }
+      }
       // A cloud acknowledgement is not physical-device confirmation. Polling reconciles the snapshot.
       this.state = { ...this.state, [attribute]: value };
       this.emit('stateUpdated', { [attribute]: value });
@@ -91,26 +119,95 @@ export class BlueAirDevice extends EventEmitter {
     await this.setState('brightness', value ? this.lastBrightness : 0);
   }
 
-  public updateState(newState: BlueAirDeviceStatus) {
+  public updateState(newState: BlueAirDeviceStatus, source = 'rest', receivedAt = Date.now()) {
     const changes: Partial<FullBlueAirDeviceState> = {};
+    const state: BlueAirDeviceState = {};
     for (const [key, value] of Object.entries(newState.state)) {
+      const at = newState.stateTimestamps?.[key] ?? receivedAt;
+      if (source === 'rest' && at < (this.pushStateTimes.get(key) ?? 0)) {
+        continue;
+      }
+      if (source === 'mqtt') {
+        if (at < (this.pushStateTimes.get(key) ?? 0)) {
+          continue;
+        }
+        this.pushStateTimes.set(key, at);
+      }
+      state[key] = value;
+      this.reportedStates.set(key, { value, at, receivedAt });
+      this.confirmReport(key, value, at, receivedAt);
       if (this.state[key] !== value) {
         changes[key] = value;
       }
     }
-    // REST can omit a sensor it has not received recently. Do not replace missing data with zero.
-    const sensors: BlueAirSensorDataWithAqi = { ...newState.sensorData };
+    const sensors: BlueAirSensorDataWithAqi = source === 'mqtt' ? { ...this.sensorData } : {};
+    for (const [key, value] of Object.entries(newState.sensorData)) {
+      const at = Math.min(receivedAt, newState.sensorTimestamps?.[key] ?? receivedAt);
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        continue;
+      }
+      if (at < (this.sensorTimes.get(key) ?? 0)) {
+        sensors[key] = this.sensorData[key];
+        continue;
+      }
+      sensors[key] = value;
+      this.sensorTimes.set(key, at);
+      this.sensorSources.set(key, source === 'mqtt' ? 'mqtt' : newState.historicalSensors?.includes(key) ? 'history' : 'rest');
+    }
+    // Sparse REST snapshots must not erase fresh push readings. Other missing readings remain unknown.
+    for (const [key, at] of this.sensorTimes) {
+      if (source === 'rest' && this.sensorSources.get(key) === 'mqtt' && receivedAt - at < 600000 && sensors[key] === undefined) {
+        sensors[key] = this.sensorData[key];
+      }
+      if (receivedAt - at >= 600000) {
+        delete sensors[key];
+      }
+    }
     sensors.aqi = this.calculateAqi(sensors);
     for (const key of new Set([...Object.keys(this.sensorData), ...Object.keys(sensors)])) {
       if (this.sensorData[key] !== sensors[key]) {
         changes[key] = sensors[key];
       }
     }
-    this.state = { ...this.state, ...newState.state };
+    this.state = { ...this.state, ...state };
     this.sensorData = sensors;
     if (Object.keys(changes).length > 0) {
       this.emit('stateUpdated', changes);
     }
+  }
+
+  public applyPush(state: BlueAirDeviceState, sensorData: BlueAirDeviceSensorData, at: number) {
+    this.updateState({ id: this.id, name: this.name, sku: this.sku, state, sensorData }, 'mqtt', at);
+  }
+
+  public expireSensors(now = Date.now()) {
+    this.applyPush({}, {}, now);
+  }
+
+  public sensorDiagnostics() {
+    return Object.fromEntries(
+      [...this.sensorTimes].map(([key, at]) => [
+        key,
+        { updatedAt: at, source: this.sensorSources.get(key), available: this.sensorData[key] !== undefined },
+      ]),
+    );
+  }
+
+  private confirmReport(attribute: string, value: unknown, at: number, receivedAt: number) {
+    const pending = this.pendingReports.get(attribute);
+    if (pending && value === pending.value && receivedAt >= pending.requestedAt && at >= pending.requestedAt - 1000) {
+      clearTimeout(pending.timer);
+      this.pendingReports.delete(attribute);
+      this.emit('commandConfirmation', attribute, 'reported');
+    }
+  }
+
+  public stop() {
+    this.reportTrackingStopped = true;
+    for (const pending of this.pendingReports.values()) {
+      clearTimeout(pending.timer);
+    }
+    this.pendingReports.clear();
   }
 
   private calculateAqi(sensors = this.sensorData): number | undefined {

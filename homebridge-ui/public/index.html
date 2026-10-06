@@ -170,7 +170,7 @@
      function createForm(configSchema, configuration) {
        const configForm = homebridge.createForm(configSchema, configuration);
        configForm.onChange(async (changes) => {
-         changes = filterOutDefaults(changes, defaultConfig);
+         // Preserve explicit false/empty values: removing defaults can retain a previous true value in the host config.
          await homebridge.updatePluginConfig([changes]);
        });
      }

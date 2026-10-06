@@ -1,6 +1,6 @@
 # Proposed next steps
 
-Status: design research, not implemented or verified on the target purifier. The current release uses REST polling and cached historical telemetry. Baseline device discovery and hardware acceptance are still pending account setup.
+Status: MQTT, polling fallback, per-field sensor timestamps, stale-data expiry, shadow ordering and bounded command-report confirmation are implemented in 1.4.0-lewis.0. Live stream, TTL and natural token-expiry verification remain acceptance items. Target 211i discovery and particulate values are verified; the owner confirmed fan, LED and Night controls. Auto, physical fan-step mapping and child lock remain unverified on hardware.
 
 ## MQTT with polling fallback
 
@@ -10,13 +10,13 @@ Use one MQTT connection per account, with endpoints chosen from the device-contr
 
 Discovery and initial snapshots stay on REST. Commands stay on REST initially; MQTT reported state confirms application when available. A cloud acknowledgement alone still cannot prove that a purifier applied a command.
 
-Proposed modes:
+Implemented modes:
 
 - `poll`: current REST-only behavior.
 - `auto`: try MQTT when login supplies its credentials, use REST when unavailable, and return to push after recovery.
 - A strict MQTT-only mode is unnecessary until hardware evidence establishes a reason for it.
 
-While push is healthy, reduce REST reconciliation to a configurable longer interval (initial candidate: 15 minutes). If the connection or sensor stream becomes stale, restore the existing 60-second polling cadence, subject to shared cooldown/backoff. Avoid a REST read for every MQTT message or every buffered slider event.
+While push is healthy, REST reconciliation uses at least 15 minutes. A sensor stream silent for 45 seconds restores configured polling (minimum 60 seconds), subject to shared cooldown/backoff. Every device must have fresh particulate messages before the account stream is considered healthy. No REST request is made for each MQTT message or buffered slider event. Sensor values expire after ten minutes. General release default remains polling-only; auto mode is selected explicitly for live acceptance.
 
 ## Lifecycle and data correctness
 

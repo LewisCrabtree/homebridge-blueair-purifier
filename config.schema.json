@@ -126,6 +126,13 @@
           }
         }
       },
+      "transportMode": {
+        "title": "Cloud updates",
+        "type": "string",
+        "enum": ["poll", "auto"],
+        "default": "poll",
+        "description": "poll: REST only. auto: MQTT live updates with automatic polling fallback. Both use Blueair's cloud."
+      },
       "sliderBufferMs": {
         "title": "Fan slider buffer",
         "description": "Wait for the final slider value before sending a cloud command (milliseconds).",
@@ -154,7 +161,9 @@
             "accountUuid",
             "verboseLogging",
             "uiDebug",
-            "pollingInterval"
+            "pollingInterval",
+            "transportMode",
+            "sliderBufferMs"
           ]
         },
         {

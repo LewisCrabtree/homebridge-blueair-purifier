@@ -8,6 +8,7 @@ import { BlueAirDevice } from './device/BlueAirDevice';
 import { AirPurifierAccessory } from './accessory/AirPurifierAccessory';
 import EventEmitter from 'events';
 import { Mutex } from 'async-mutex';
+import { BlueAirMqtt } from './api/BlueAirMqtt';
 
 export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
@@ -28,6 +29,9 @@ export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlug
   private initialized = false;
   private pollingInFlight = false;
   private pollFailures = 0;
+  private mqtt?: BlueAirMqtt;
+  private watchdog?: NodeJS.Timeout;
+  private mqttWasHealthy = false;
 
   constructor(
     public readonly log: Logger,
@@ -70,6 +74,8 @@ export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlug
         clearTimeout(this.polling);
       }
       this.emit('shutdown');
+      clearInterval(this.watchdog);
+      this.mqtt?.stop();
     });
   }
 
@@ -85,8 +91,9 @@ export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlug
     if (this.stopped) {
       return;
     }
+    const interval = this.mqtt?.isHealthy() ? Math.max(900000, this.platformConfig.pollingInterval) : this.platformConfig.pollingInterval;
     const delay = Math.max(
-      this.platformConfig.pollingInterval,
+      interval,
       this.blueAirApi.cooldownMs,
       Math.min(1800000, this.platformConfig.pollingInterval * 2 ** Math.min(this.pollFailures, 5)),
     );
@@ -117,7 +124,7 @@ export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlug
             if (status) {
               device.updateState(status);
             }
-            device.emit('availability', !!status);
+            device.emit('availability', !!status && status.state.online !== false);
           }
         }
       });
@@ -125,7 +132,9 @@ export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlug
     } catch (error) {
       this.pollFailures++;
       for (const device of this.devices) {
-        device.emit('availability', false);
+        if (!this.mqtt?.isHealthy()) {
+          device.emit('availability', false);
+        }
       }
       this.log.warn(`Blueair refresh failed: ${(error as Error).message}. Recovery uses backoff.`);
     } finally {
@@ -159,6 +168,57 @@ export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlug
     if (!this.initialized) {
       throw new Error('Some configured Blueair devices are missing from the cloud response');
     }
+    if (!this.watchdog) {
+      this.watchdog = setInterval(() => {
+        for (const device of this.devices) {
+          device.expireSensors();
+        }
+        const healthy = this.mqtt?.isHealthy() ?? false;
+        if (healthy !== this.mqttWasHealthy) {
+          this.mqttWasHealthy = healthy;
+          this.log.info(
+            healthy
+              ? 'Blueair live sensor stream active; REST reconciliation reduced.'
+              : 'Blueair live sensor stream stale; REST polling fallback active.',
+          );
+          // Change cadence only on transitions; resetting every tick would postpone polling forever.
+          this.schedulePolling();
+        }
+      }, 15000);
+    }
+    if (this.platformConfig.transportMode === 'auto' && !this.mqtt) {
+      this.mqtt = new BlueAirMqtt(
+        () => this.blueAirApi.getMqttCredentials(),
+        new Map(
+          statuses
+            .filter((s) => uuids.includes(s.id))
+            .map((s) => [s.id, Number.isFinite(s.sensorStreamTtl) && s.sensorStreamTtl! > 0 ? s.sensorStreamTtl! : 1200]),
+        ),
+      );
+      this.mqtt.on('sensors', (id, sensors, at) => {
+        if (!this.stopped) {
+          const device = this.devices.find((device) => device.id === id);
+          device?.applyPush({}, sensors, at);
+          device?.emit('availability', true);
+        }
+      });
+      this.mqtt.on('state', (id, state, at) => {
+        if (!this.stopped) {
+          this.devices.find((device) => device.id === id)?.applyPush(state, {}, at);
+        }
+      });
+      this.mqtt.on('online', (id, online) => this.devices.find((device) => device.id === id)?.emit('availability', online));
+      this.mqtt.on('health', (connected) => {
+        this.mqttWasHealthy = false;
+        this.log.info(
+          connected
+            ? 'Blueair MQTT connected; waiting for live sensor updates.'
+            : 'Blueair MQTT unavailable; polling fallback remains active.',
+        );
+        this.schedulePolling();
+      });
+      this.mqtt.start();
+    }
   }
 
   async addDevice(device: BlueAirDeviceStatus) {
@@ -173,25 +233,37 @@ export class BlueAirPlatform extends EventEmitter implements DynamicPlatformPlug
 
     defaultsDeep(deviceConfig, defaultDeviceConfig);
     this.existingUuids.push(device.id);
-    const blueAirDevice = new BlueAirDevice(device, async (attribute, value) => {
-      if (this.stopped) {
-        throw new Error('Blueair bridge is shutting down');
-      }
-      if (this.polling) {
-        clearTimeout(this.polling);
-      }
-      try {
-        await this.operationMutex.runExclusive(() => {
-          if (this.stopped) {
-            throw new Error('Blueair bridge is shutting down');
-          }
-          return this.blueAirApi.setDeviceStatus(device.id, attribute, value);
-        });
-      } catch (error) {
-        blueAirDevice.emit('availability', false);
-        throw error;
-      } finally {
-        this.schedulePolling();
+    const blueAirDevice = new BlueAirDevice(
+      device,
+      async (attribute, value) => {
+        if (this.stopped) {
+          throw new Error('Blueair bridge is shutting down');
+        }
+        if (this.polling) {
+          clearTimeout(this.polling);
+        }
+        try {
+          await this.operationMutex.runExclusive(() => {
+            if (this.stopped) {
+              throw new Error('Blueair bridge is shutting down');
+            }
+            return this.blueAirApi.setDeviceStatus(device.id, attribute, value);
+          });
+        } catch (error) {
+          blueAirDevice.emit('availability', false);
+          throw error;
+        } finally {
+          this.schedulePolling();
+        }
+      },
+      this.platformConfig.transportMode === 'auto',
+    );
+    this.on('shutdown', () => blueAirDevice.stop());
+    blueAirDevice.on('commandConfirmation', (attribute, outcome) => {
+      if (outcome === 'reported') {
+        this.log.debug(`[${device.name}] ${attribute} confirmed by a device report.`);
+      } else {
+        this.log.warn(`[${device.name}] ${attribute} accepted by the cloud but not confirmed within 30 seconds; it was not resent.`);
       }
     });
     this.log.info(`[${device.name}] Device type is ${blueAirDevice.deviceType}`);

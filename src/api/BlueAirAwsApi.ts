@@ -55,9 +55,15 @@ export type BlueAirDeviceStatus = {
   sku: string;
   supportedSensors?: string[];
   hardware?: string;
+  sensorTimestamps?: Record<string, number>;
+  stateTimestamps?: Record<string, number>;
+  historicalSensors?: string[];
+  sensorStreamTtl?: number;
   state: BlueAirDeviceState;
   sensorData: BlueAirDeviceSensorData;
 };
+
+export type MqttCredentials = { host: string; userId: string; headers: Record<string, string>; expiresAt: number };
 
 type BlueAirSetStateBody = {
   n: string;
@@ -81,6 +87,8 @@ export default class BlueAirAwsApi {
   private readonly policy = new RequestPolicy();
   private loginPromise?: Promise<void>;
   private telemetryCache = new Map<string, { time: number; data: BlueAirDeviceSensorData }>();
+  private telemetryTimes = new Map<string, Record<string, number>>();
+  private mqttCredentials?: MqttCredentials;
 
   private last_login: number;
 
@@ -96,7 +104,7 @@ export default class BlueAirAwsApi {
     password: string,
     region: Region,
     private readonly logger: Logger,
-    cloudRegion: Region = region,
+    private readonly cloudRegion: Region = region,
   ) {
     const config = getAwsConfig(cloudRegion);
     this.blueAirApiUrl = `https://${config.restApiId}.execute-api.${config.awsRegion}.amazonaws.com/prod/c`;
@@ -115,6 +123,13 @@ export default class BlueAirAwsApi {
 
   get cooldownMs(): number {
     return this.policy.remainingMs;
+  }
+
+  async getMqttCredentials(): Promise<MqttCredentials | undefined> {
+    if (!this.mqttCredentials || this.mqttCredentials.expiresAt - Date.now() < 300000) {
+      await this.login();
+    }
+    return this.mqttCredentials;
   }
 
   async login(): Promise<void> {
@@ -194,6 +209,14 @@ export default class BlueAirAwsApi {
         name: device.configuration.di.name,
         sku: device.configuration.di.sku,
         hardware: device.configuration.di.hw,
+        sensorStreamTtl: device.configuration.ds?.rt5s?.ttl,
+        sensorTimestamps: Object.fromEntries(
+          device.sensordata
+            .filter((s) => BlueAirDeviceSensorDataMap[s.n])
+            .map((s) => [BlueAirDeviceSensorDataMap[s.n], s.t > 0 ? s.t * 1000 : Date.now()]),
+        ),
+        stateTimestamps: Object.fromEntries(device.states.map((s) => [s.n, s.t > 0 ? s.t * 1000 : Date.now()])),
+        historicalSensors: [] as string[],
         supportedSensors: Array.from(new Set([...this.getAvailableSensorNames(device), ...device.sensordata.map((s) => s.n)]))
           .map((name) => BlueAirDeviceSensorDataMap[name])
           .filter((name): name is string => !!name),
@@ -238,6 +261,8 @@ export default class BlueAirAwsApi {
             for (const key of missing) {
               if (cached.data[key] !== undefined) {
                 status.sensorData[key] = cached.data[key];
+                status.sensorTimestamps![key] = this.telemetryTimes.get(status.id)?.[key] ?? cached.time;
+                status.historicalSensors!.push(key);
               }
             }
             this.logger.debug(`[${status.name}] Sensor data from telemetry: ${JSON.stringify(cached.data)}`);
@@ -303,6 +328,7 @@ export default class BlueAirAwsApi {
     }
 
     const sensorData: BlueAirDeviceSensorData = {};
+    const timestamps: Record<string, number> = {};
     // Sensors can publish at different times; find the newest valid value for each one.
     for (let i = 0; i < entry.sensors.length; i++) {
       const key = BlueAirDeviceSensorDataMap[entry.sensors[i]];
@@ -317,11 +343,14 @@ export default class BlueAirAwsApi {
         const value = Number(raw);
         if (Number.isFinite(value) && value >= 0) {
           sensorData[key] = value;
+          const seconds = Number(row[0]);
+          timestamps[key] = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : Date.now();
           break;
         }
       }
     }
 
+    this.telemetryTimes.set(uuid, timestamps);
     return sensorData;
   }
 
@@ -365,6 +394,22 @@ export default class BlueAirAwsApi {
     };
 
     this.logger.debug('AWS access token received');
+    const names = ['Name', 'Signature', 'Token'];
+    const headers = Object.fromEntries(
+      names.map((name) => [`X-Amz-CustomAuthorizer-${name}`, response[`ba_X-Amz-CustomAuthorizer-${name}`]]),
+    );
+    this.mqttCredentials =
+      names.every((name) => typeof headers[`X-Amz-CustomAuthorizer-${name}`] === 'string') && tokenPayload.username
+        ? {
+            host:
+              this.cloudRegion === Region.CN
+                ? 'a2du5f95w7oz2a.ats.iot.cn-north-1.amazonaws.com.cn'
+                : `a3tpdpjvxk6yog-ats.iot.${getAwsConfig(this.cloudRegion).awsRegion}.amazonaws.com`,
+            userId: tokenPayload.username,
+            headers,
+            expiresAt: Date.now() + Math.min(LOGIN_EXPIRATION, Math.max(600, Number(response.expires_in) || 86400) * 1000),
+          }
+        : undefined;
     return {
       accessToken,
       idToken: response.id_token ?? jwt,

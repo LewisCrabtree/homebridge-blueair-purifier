@@ -68,7 +68,7 @@ export type BlueAirDeviceStatusResponse = {
         sku: string;
         hw?: string;
       };
-      ds?: Record<string, { sn?: string[] }>;
+      ds?: Record<string, { sn?: string[]; ttl?: number }>;
     };
     sensordata: {
       n: string;

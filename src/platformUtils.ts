@@ -9,6 +9,7 @@ export type Config = {
   uiDebug: boolean;
   pollingInterval: number;
   sliderBufferMs: number;
+  transportMode: 'poll' | 'auto';
   devices: DeviceConfig[];
 };
 
@@ -44,6 +45,7 @@ export const defaultConfig: Config = {
   accountUuid: '',
   region: Region.EU,
   pollingInterval: 60000,
+  transportMode: 'poll',
   sliderBufferMs: 350,
   devices: [],
 };

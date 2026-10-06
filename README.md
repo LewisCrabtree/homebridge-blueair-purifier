@@ -4,6 +4,11 @@ A personal fork of [kovapatrik/homebridge-blueair-purifier](https://github.com/k
 
 ## Changes
 
+- Optional `transportMode: "auto"` receives MQTT sensor/state updates over TLS, with one connection per account, automatic token rotation, stream-TTL renewal and jittered reconnect backoff. The default remains `poll`. Commands still use REST.
+- Healthy MQTT reduces REST reconciliation to at least 15 minutes. A disconnected or silent sensor stream restores the configured polling interval (minimum 60 seconds). Broker disconnection alone does not mark the purifier offline.
+- Sensor timestamps/source are tracked separately; older REST/history cannot overwrite newer push readings. Particulate values expire after ten minutes without fresh data. Duplicate/older shadow versions are ignored.
+- In auto mode, accepted commands wait for a matching fresh device report in the background. Unconfirmed commands log a warning after 30 seconds without being resent. This confirms reported state, not an independent measurement of physical operation.
+- Setup preserves explicit unchecked controls instead of stripping false/default values. The cloud transport and slider buffer are selectable in the form.
 - Cloud throttling (229/429) stops immediate retries and starts a shared client cooldown, honoring Retry-After. Failed authentication waits at least 15 minutes. Login refresh is single-flight and has a timeout.
 - Polling has a 60-second minimum, backs off after failures, recovers from startup failures, and stops on shutdown. Reads and cloud writes share a lock. Slider values are buffered for 350 ms and only the last value is sent.
 - Failed writes reject HomeKit handlers. Ambiguous writes are never automatically replayed. A successful cloud acknowledgement is reconciled by the next poll; it is not proof of physical application.
@@ -18,7 +23,7 @@ A personal fork of [kovapatrik/homebridge-blueair-purifier](https://github.com/k
 Use the `.tgz` attached to a GitHub release or the manual Actions package artifact. From the Homebridge terminal:
 
 ```sh
-npm install --prefix /var/lib/homebridge --save --omit=dev /path/to/lewiscrabtree-homebridge-blueair-purifier-1.3.0-lewis.1.tgz
+npm install --prefix /var/lib/homebridge --save --omit=dev /path/to/lewiscrabtree-homebridge-blueair-purifier-1.4.0-lewis.0.tgz
 ```
 
 Alternatively, install a pinned Git commit (npm builds the TypeScript via the prepare script):
@@ -40,7 +45,7 @@ npm test
 npm pack --ignore-scripts
 ```
 
-Automated tests cover actual HAP services, sensor boundaries/missing data, failure propagation, concurrent writes, buffered controls, throttling, login coalescing, telemetry fallback and startup/shutdown recovery. Hardware acceptance requires HomeKit/app/device agreement for power, every physical fan level, Auto, Night, LEDs, child lock, particulate readings, filter status, and reconnection. Cloud telemetry can lag; this version uses REST and historical fallback, not MQTT push or local control. Blueair service outages and account-wide quotas still apply.
+Automated tests cover actual HAP services, sensor boundaries/missing data, failure propagation, concurrent writes, buffered controls, throttling, login coalescing, telemetry fallback, MQTT subscriptions/renewal, ordering, freshness, fallback, command reports and startup/shutdown recovery. Target 211i discovery and particulate values were verified, and the owner confirmed fan, LED and Night controls. Auto, physical fan-step mapping and child lock still require hardware acceptance. MQTT live stream/TTL/token-expiry acceptance is recorded separately. Both transports use Blueair's cloud; local control is not implemented. Blueair outages and account-wide quotas still apply.
 
 Before deployment, back up Homebridge's config and installed-package manifest outside this repository. Rollback consists of removing this scoped package and restoring the prior config/package installation. Never commit account credentials, device identifiers, or Homebridge backups.
 

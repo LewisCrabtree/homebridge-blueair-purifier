@@ -14,6 +14,7 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
+    "skipLibCheck": true, // MQTT's optional browser declarations are not used by the Node runtime.
     "esModuleInterop": true,
     "noImplicitAny": false
   },
