@@ -1,11 +1,18 @@
-name: Build installable package
+name: Package and release
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  validate:
+    uses: ./.github/workflows/build.yml
   package:
+    needs: validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -14,8 +21,31 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run lint -- --max-warnings=0
       - run: npm test
-      - run: npm pack --ignore-scripts
+      - name: Build archive and verify packaged runtime
+        run: |
+          ARCHIVE=$(npm pack --ignore-scripts --silent)
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          npm install --prefix "$RUNNER_TEMP/plugin-smoke" --omit=dev --ignore-scripts --no-audit --no-fund "$PWD/$ARCHIVE"
+          node -e 'const p=process.argv[1]; let registered=false; require(p+"/dist/index.js")({registerPlatform(plugin,platform){if(plugin!=="@lewiscrabtree/homebridge-blueair-purifier"||platform!=="blueair-purifier")throw Error("Unexpected registration");registered=true;}});if(!registered)throw Error("Plugin did not register");' "$RUNNER_TEMP/plugin-smoke/node_modules/@lewiscrabtree/homebridge-blueair-purifier"
       - uses: actions/upload-artifact@v4
         with:
           name: lewis-blueair-plugin
-          path: '*.tgz'
+          path: |
+            *.tgz
+            *.tgz.sha256
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(node -p 'require("./package.json").version')
+          test "$RELEASE_TAG" = "v$VERSION"
+          printf '%s\n' 'Personal Blueair Homebridge fork. Node 20/22/24 tests, lint, build, and packaged runtime checks passed. See README for features, installation, and hardware validation limits.' > "$RUNNER_TEMP/release-notes.txt"
+          EXTRA=()
+          if [[ "$VERSION" == *-* ]]; then EXTRA+=(--prerelease); fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" ./*.tgz ./*.tgz.sha256
+          else
+            gh release create "$RELEASE_TAG" ./*.tgz ./*.tgz.sha256 --verify-tag --title "Blueair Purifier (Lewis) $VERSION" --notes-file "$RUNNER_TEMP/release-notes.txt" "${EXTRA[@]}"
+          fi
