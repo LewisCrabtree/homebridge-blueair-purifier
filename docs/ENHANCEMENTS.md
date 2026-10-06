@@ -1,6 +1,16 @@
 # Proposed next steps
 
-Status: MQTT, polling fallback, per-field sensor timestamps, stale-data expiry, shadow ordering and bounded command-report confirmation are implemented in 1.4.0-lewis.0. Live stream, TTL and natural token-expiry verification remain acceptance items. Target 211i discovery and particulate values are verified; the owner confirmed fan, LED and Night controls. Auto, physical fan-step mapping and child lock remain unverified on hardware.
+Status: MQTT, polling fallback, per-field sensor timestamps, stale-data expiry, shadow ordering and bounded command-report confirmation are implemented in 1.4.0-lewis.0. Live stream, accelerated TTL renewal and reconnect are verified below; normal-TTL and natural token-expiry soaks remain acceptance items. Target 211i discovery and particulate values are verified; the owner confirmed fan, LED and Night controls. Auto, physical fan-step mapping and child lock remain unverified on hardware.
+
+### Target acceptance on October 5, 2026
+
+Release 1.4.0-lewis.2 passed Node 20/22/24 CI, lint, 40 tests and the packaged-runtime smoke test. Production dependency audit reported no known advisories after updating Lodash to 4.18.1. A follow-up fixture also checks credential rotation and replacement authorization.
+
+The target 211i delivered 35 live sensor batches in a three-minute test at roughly five-second intervals. A forced MQTT disconnect reconnected in about six seconds; the longest sensor gap was 9.842 seconds. Thirteen SUBSCRIBE packets were sent, including sensor renewals using a deliberately shortened 30-second test TTL. The device declares a normal TTL of 1200 seconds; this accelerated test does not establish a full normal-TTL soak.
+
+Real shadow reports confirmed both a reversible LED adjustment and its restoration, with REST readback agreeing afterward. The deployed Homebridge child bridge restored its existing accessory, connected MQTT and activated reduced REST reconciliation. HAP PM2.5/PM10 readings and No Fault were visible in the Homebridge UI. No additional purifier or duplicate accessory was registered.
+
+Automatic MQTT mode is enabled explicitly on the target bridge; general package default remains polling-only. Normal 20-minute stream lifetime and natural 24-hour credential-expiry soak remain unverified. Broker-loss/fallback timers, stale-data expiry, partial/older messages and credential replacement have deterministic fixture coverage. This integration continues to depend on Blueair's cloud.
 
 ## MQTT with polling fallback
 

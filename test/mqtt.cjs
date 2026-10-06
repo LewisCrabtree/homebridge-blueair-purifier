@@ -107,6 +107,19 @@ test('shutdown while authentication is pending cannot create a connection', asyn
   assert.equal(s.clients.length, 0);
 });
 
+test('credential rotation replaces the socket and obtains updated authorization', async () => {
+  let requests = 0;
+  const s = session(1200, async () => ({ ...auth(), headers: { 'X-Amz-CustomAuthorizer-Token': `token-${++requests}` } }));
+  try {
+    s.mqtt.start(); await tick(); s.clients[0].emit('connect');
+    s.mqtt.refreshTimer._onTimeout();
+    assert.equal(s.clients[0].ended, true);
+    await s.mqtt.open();
+    assert.equal(s.clients.length, 2);
+    assert.equal(s.clients[1].options.wsOptions.headers['X-Amz-CustomAuthorizer-Token'], 'token-2');
+  } finally { s.mqtt.stop(); }
+});
+
 test('fresh push values survive partial and older historical REST, then expire honestly', () => {
   const now = Date.now();
   const d = new BlueAirDevice(snapshot());
