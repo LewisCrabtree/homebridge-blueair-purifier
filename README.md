@@ -23,7 +23,7 @@ A personal fork of [kovapatrik/homebridge-blueair-purifier](https://github.com/k
 Use the `.tgz` attached to a GitHub release or the manual Actions package artifact. From the Homebridge terminal:
 
 ```sh
-npm install --prefix /var/lib/homebridge --save --omit=dev /path/to/lewiscrabtree-homebridge-blueair-purifier-1.4.0-lewis.0.tgz
+npm install --prefix /var/lib/homebridge --save --omit=dev /path/to/lewiscrabtree-homebridge-blueair-purifier-1.4.0-lewis.1.tgz
 ```
 
 Alternatively, install a pinned Git commit (npm builds the TypeScript via the prepare script):

@@ -171,11 +171,22 @@ test('cloud login retains MQTT authorization separately from public diagnostics'
   api.apiCall = async () => ({ access_token: token, expires_in: 86400,
     'ba_X-Amz-CustomAuthorizer-Name': 'name', 'ba_X-Amz-CustomAuthorizer-Signature': 'signature', 'ba_X-Amz-CustomAuthorizer-Token': 'token' });
   await api.getAwsAccessToken('fixture');
+  api.last_login = Date.now();
   const creds = await api.getMqttCredentials();
   assert.match(creds.host, /us-east-2/);
   assert.equal(creds.userId, 'account');
   assert.equal(creds.headers['X-Amz-CustomAuthorizer-Signature'], 'signature');
   assert.ok(creds.expiresAt > Date.now() + 86000000);
+});
+
+test('missing MQTT credentials do not repeat a recent successful account login', async () => {
+  const api = new BlueAirAwsApi('fixture', 'fixture', Region.US, quiet);
+  api.last_login = Date.now();
+  let logins = 0;
+  api.login = async () => { logins++; };
+  assert.equal(await api.getMqttCredentials(), undefined);
+  assert.equal(await api.getMqttCredentials(), undefined);
+  assert.equal(logins, 0);
 });
 
 test('UI sends explicit false values and empty device arrays instead of stripping defaults', async () => {

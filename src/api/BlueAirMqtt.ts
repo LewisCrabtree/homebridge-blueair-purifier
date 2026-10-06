@@ -119,7 +119,8 @@ export class BlueAirMqtt extends EventEmitter {
         }
         this.subscribe(client, generation, `c/${auth.userId}/s/event`);
         if (current()) {
-          this.refreshTimer = setTimeout(() => this.fail(generation), Math.max(1000, auth.expiresAt - Date.now() - 240000));
+          const remaining = auth.expiresAt - Date.now();
+          this.refreshTimer = setTimeout(() => this.fail(generation), Math.max(1000, remaining - Math.min(240000, remaining * 0.2)));
         }
       });
       client.on('message', (topic, payload, packet) => {

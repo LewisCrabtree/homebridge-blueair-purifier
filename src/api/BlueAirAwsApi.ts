@@ -126,7 +126,11 @@ export default class BlueAirAwsApi {
   }
 
   async getMqttCredentials(): Promise<MqttCredentials | undefined> {
-    if (!this.mqttCredentials || this.mqttCredentials.expiresAt - Date.now() < 300000) {
+    if (
+      !this.last_login ||
+      Date.now() - this.last_login >= LOGIN_EXPIRATION - 300000 ||
+      (this.mqttCredentials && this.mqttCredentials.expiresAt - Date.now() < 300000)
+    ) {
       await this.login();
     }
     return this.mqttCredentials;
@@ -407,7 +411,7 @@ export default class BlueAirAwsApi {
                 : `a3tpdpjvxk6yog-ats.iot.${getAwsConfig(this.cloudRegion).awsRegion}.amazonaws.com`,
             userId: tokenPayload.username,
             headers,
-            expiresAt: Date.now() + Math.min(LOGIN_EXPIRATION, Math.max(600, Number(response.expires_in) || 86400) * 1000),
+            expiresAt: Date.now() + Math.min(LOGIN_EXPIRATION, Math.max(60, Number(response.expires_in) || 86400) * 1000),
           }
         : undefined;
     return {

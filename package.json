@@ -1,7 +1,7 @@
 {
   "displayName": "Blueair Purifier (Lewis)",
   "name": "@lewiscrabtree/homebridge-blueair-purifier",
-  "version": "1.4.0-lewis.0",
+  "version": "1.4.0-lewis.1",
   "description": "Homebridge plugin for BlueAir purifiers",
   "license": "Apache-2.0",
   "repository": {
